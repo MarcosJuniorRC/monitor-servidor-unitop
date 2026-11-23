@@ -1,0 +1,119 @@
+# Monitor de disponibilidade UNITOP -> Telegram
+# Roda na infraestrutura do GitHub (fora do seu servidor).
+# Secrets necessários (Settings > Secrets and variables > Actions):
+#   TELEGRAM_TOKEN    -> token do bot (@BotFather)
+#   TELEGRAM_CHAT_ID  -> seu chat_id ou o ID do grupo (negativo)
+
+name: Monitor UNITOP
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'     # a cada 5 min (mínimo permitido pelo GitHub)
+  workflow_dispatch:           # permite rodar manualmente para testar
+
+concurrency:
+  group: monitor-unitop
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Estado anterior (up/down) para alertar só na MUDANÇA, sem spam
+      - name: Restaurar estado
+        uses: actions/cache/restore@v4
+        with:
+          path: estado
+          key: estado-${{ github.run_id }}
+          restore-keys: estado-
+
+      - name: Verificar sites
+        env:
+          TG_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          LEMBRETE_MIN: 30          # reenvia alerta enquanto continuar fora (0 = desliga)
+        shell: bash
+        run: |
+          set -u
+          mkdir -p estado
+
+          SITES=(
+            "Site UNITOP|https://www.unitopconsultoria.com.br"
+            "MCC|https://mcc.unitopconsultoria.com.br/"
+          )
+
+          agora_br() { TZ=America/Cuiaba date '+%d/%m/%Y %H:%M:%S'; }
+
+          tg() {
+            curl -s -o /dev/null -m 15 -X POST \
+              "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${TG_CHAT}" \
+              --data-urlencode "text=$1" \
+              -d parse_mode=HTML -d disable_web_page_preview=true
+          }
+
+          duracao() {
+            local s=$1 h m
+            h=$(( s / 3600 )); m=$(( (s % 3600) / 60 ))
+            (( h > 0 )) && echo "${h}h ${m}min" || echo "${m}min"
+          }
+
+          for item in "${SITES[@]}"; do
+            nome="${item%%|*}"; url="${item#*|}"
+            arq="estado/$(echo -n "$url" | md5sum | cut -c1-12)"
+
+            # estado salvo: status desde ultimo_alerta
+            read -r st desde ult <<< "$(cat "$arq" 2>/dev/null || echo "up 0 0")"
+
+            # Até 3 tentativas com 15s de intervalo (evita alarme falso por oscilação)
+            ok=0; motivo=""; tempo=""
+            for t in 1 2 3; do
+              r=$(curl -sS -o /dev/null -L --max-redirs 5 \
+                    --connect-timeout 10 -m 25 -A "UNITOP-Monitor/1.0" \
+                    -w '%{http_code} %{time_total}' "$url" 2>/tmp/err)
+              code="${r%% *}"; tempo="${r##* }"
+              if [[ "$code" =~ ^[23][0-9][0-9]$ ]]; then ok=1; break; fi
+              if [[ "$code" == "000" || -z "$code" ]]; then
+                motivo="$(head -c 200 /tmp/err)"
+              else
+                motivo="HTTP $code"
+              fi
+              (( t < 3 )) && sleep 15
+            done
+
+            agora=$(date +%s)
+
+            if (( ok )); then
+              echo "OK   $nome ($code em ${tempo}s)"
+              if [[ "$st" == "down" ]]; then
+                tg "✅ <b>${nome} voltou ONLINE</b>
+          🔗 ${url}
+          ⏱ Ficou fora por: $(duracao $(( agora - desde )))
+          ⚡ Resposta: ${tempo}s
+          🕒 $(agora_br)"
+              fi
+              echo "up $agora 0" > "$arq"
+            else
+              echo "FAIL $nome -> $motivo"
+              if [[ "$st" == "up" ]]; then
+                tg "🔴 <b>${nome} está OFFLINE</b>
+          🔗 ${url}
+          ❌ Motivo: ${motivo}
+          🕒 $(agora_br)"
+                echo "down $agora $agora" > "$arq"
+              elif (( LEMBRETE_MIN > 0 && agora - ult >= LEMBRETE_MIN * 60 )); then
+                tg "⚠️ <b>${nome} continua OFFLINE</b> há $(duracao $(( agora - desde )))
+          🔗 ${url}
+          ❌ Motivo: ${motivo}"
+                echo "down $desde $agora" > "$arq"
+              fi
+            fi
+          done
+
+      - name: Salvar estado
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: estado
+          key: estado-${{ github.run_id }}
