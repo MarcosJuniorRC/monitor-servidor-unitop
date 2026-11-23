@@ -30,7 +30,7 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: estado
-          key: estado-${{ github.run_id }}
+          key: estado-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: estado-
 
       - name: Verificar sites
@@ -140,4 +140,4 @@ jobs:
         uses: actions/cache/save@v5
         with:
           path: estado
-          key: estado-${{ github.run_id }}
+          key: estado-${{ github.run_id }}-${{ github.run_attempt }}
