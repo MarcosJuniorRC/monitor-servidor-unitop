@@ -10,6 +10,11 @@ on:
   schedule:
     - cron: '*/5 * * * *'     # a cada 5 min (mínimo permitido pelo GitHub)
   workflow_dispatch:           # permite rodar manualmente para testar
+    inputs:
+      teste_telegram:
+        description: 'Enviar mensagem de teste no Telegram'
+        type: boolean
+        default: false
 
 concurrency:
   group: monitor-unitop
@@ -22,7 +27,7 @@ jobs:
     steps:
       # Estado anterior (up/down) para alertar só na MUDANÇA, sem spam
       - name: Restaurar estado
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: estado
           key: estado-${{ github.run_id }}
@@ -33,6 +38,7 @@ jobs:
           TG_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
           LEMBRETE_MIN: 30          # reenvia alerta enquanto continuar fora (0 = desliga)
+          TESTE_TG: ${{ inputs.teste_telegram || false }}
         shell: bash
         run: |
           set -u
@@ -45,13 +51,31 @@ jobs:
 
           agora_br() { TZ=America/Cuiaba date '+%d/%m/%Y %H:%M:%S'; }
 
+          # Envia e MOSTRA no log se o Telegram aceitou ou o erro retornado
           tg() {
-            curl -s -o /dev/null -m 15 -X POST \
+            local resp
+            resp=$(curl -s -m 15 -X POST \
               "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
               --data-urlencode "chat_id=${TG_CHAT}" \
               --data-urlencode "text=$1" \
-              -d parse_mode=HTML -d disable_web_page_preview=true
+              -d parse_mode=HTML -d disable_web_page_preview=true)
+            if [[ "$resp" == *'"ok":true'* ]]; then
+              echo "  -> Telegram: mensagem enviada"
+            else
+              echo "::error::Telegram recusou: ${resp:-sem resposta}"
+            fi
           }
+
+          if [[ -z "${TG_TOKEN}" || -z "${TG_CHAT}" ]]; then
+            echo "::error::Secrets TELEGRAM_TOKEN e/ou TELEGRAM_CHAT_ID não configurados"
+            exit 1
+          fi
+
+          if [[ "${TESTE_TG}" == "true" ]]; then
+            tg "🧪 <b>Teste do Monitor UNITOP</b>
+          Integração com o Telegram funcionando.
+          🕒 $(agora_br)"
+          fi
 
           duracao() {
             local s=$1 h m
@@ -113,7 +137,7 @@ jobs:
 
       - name: Salvar estado
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: estado
           key: estado-${{ github.run_id }}
